@@ -64,7 +64,47 @@ ALSA_DEVICE=plughw:1,0
 systemctl --user --now enable kiosk-audio-gateway.service
 ```
 
-Watch logs:
+Open the local UI on the kiosk:
+
+```text
+http://localhost:8765
+```
+
+The UI shows:
+
+- gate open/closed
+- current ReSpeaker `direction`
+- current `is_voice`
+- whether the direction is inside the configured front window
+- live diagnostics
+- editable calibration values
+
+Most calibration changes apply immediately:
+
+- `FRONT_CENTER_DEG`
+- `FRONT_HALF_WINDOW_DEG`
+- `OPEN_STABLE_MS`
+- `CLOSE_STABLE_MS`
+
+Audio plumbing fields require a service restart after saving:
+
+- `ALSA_DEVICE`
+- `RATE`
+- `CHANNELS`
+- `FRAME_MS`
+- `FIFO_PATH`
+- `RESPEAKER_REPO`
+- `POLL_MS`
+- `UI_HOST`
+- `UI_PORT`
+
+Restart after changing those:
+
+```bash
+systemctl --user restart kiosk-audio-gateway.service
+```
+
+Logs are still available for deeper troubleshooting:
 
 ```bash
 journalctl --user -u kiosk-audio-gateway.service -f
@@ -190,6 +230,12 @@ FRONT_HALF_WINDOW_DEG=35
 
 If too much side speech passes through, reduce `FRONT_HALF_WINDOW_DEG` to `25`.
 If real customers are clipped, increase it to `40`.
+
+You can also do this from the UI at:
+
+```text
+http://localhost:8765
+```
 
 ## Troubleshooting
 
