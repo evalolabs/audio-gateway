@@ -63,6 +63,9 @@ CONFIG_FIELDS: dict[str, dict[str, Any]] = {
     "RATE": {"type": "int", "default": 16000, "restart": True},
     "CHANNELS": {"type": "int", "default": 1, "restart": True},
     "FRAME_MS": {"type": "int", "default": 20, "restart": True},
+    "ARECORD_PERIOD_SIZE": {"type": "int", "default": 320, "restart": True},
+    "ARECORD_BUFFER_SIZE": {"type": "int", "default": 1280, "restart": True},
+    "AUDIO_RETRY_SECONDS": {"type": "float", "default": 2.0, "restart": False},
     "FIFO_PATH": {"type": "str", "default": f"/run/user/{os.getuid()}/kiosk_customer_mic.fifo", "restart": True},
     "RESPEAKER_REPO": {"type": "str", "default": "~/Downloads/usb_4_mic_array", "restart": True},
     "FRONT_CENTER_DEG": {"type": "float", "default": 180.0, "restart": False},
@@ -110,6 +113,8 @@ class GatewayState:
             "in_front": False,
             "angular_error_deg": None,
             "telemetry_error": None,
+            "audio_error": None,
+            "audio_capture_active": False,
             "open_counter_ms": 0,
             "close_counter_ms": 0,
             "alsa_device": settings.get("ALSA_DEVICE"),
@@ -226,6 +231,10 @@ def _ui_html() -> bytes:
       <input name="CLOSE_STABLE_MS" type="number" step="10">
       <label>ALSA device (restart required)</label>
       <input name="ALSA_DEVICE" type="text">
+      <label>arecord period size (restart required)</label>
+      <input name="ARECORD_PERIOD_SIZE" type="number" step="1">
+      <label>arecord buffer size (restart required)</label>
+      <input name="ARECORD_BUFFER_SIZE" type="number" step="1">
       <button type="submit">Save config</button>
     </form>
     <p id="saveResult" class="hint"></p>
@@ -402,7 +411,14 @@ def _ensure_fifo(path: Path) -> None:
     os.mkfifo(path)
 
 
-def _start_arecord(device: str, rate: int, channels: int) -> subprocess.Popen[bytes]:
+def _start_arecord(
+    device: str,
+    rate: int,
+    channels: int,
+    *,
+    period_size: int,
+    buffer_size: int,
+) -> subprocess.Popen[bytes]:
     cmd = [
         "arecord",
         "-D",
@@ -413,6 +429,10 @@ def _start_arecord(device: str, rate: int, channels: int) -> subprocess.Popen[by
         str(rate),
         "-c",
         str(channels),
+        "--period-size",
+        str(period_size),
+        "--buffer-size",
+        str(buffer_size),
         "-t",
         "raw",
         "-q",
@@ -465,9 +485,12 @@ def main() -> int:
     frame_ms = int(settings["FRAME_MS"])
     bytes_per_frame = rate * frame_ms // 1000 * channels * 2
     alsa_device = str(settings["ALSA_DEVICE"])
+    period_size = int(settings["ARECORD_PERIOD_SIZE"])
+    buffer_size = int(settings["ARECORD_BUFFER_SIZE"])
     fifo_path = Path(str(settings["FIFO_PATH"]))
     respeaker_repo = str(settings["RESPEAKER_REPO"])
     poll_ms = int(settings["POLL_MS"])
+    audio_retry_seconds = float(settings["AUDIO_RETRY_SECONDS"])
     ui_host = str(settings["UI_HOST"])
     ui_port = int(settings["UI_PORT"])
 
@@ -485,7 +508,8 @@ def main() -> int:
     poller.start()
     ui_server = _start_ui_server(state, ui_host, ui_port)
 
-    rec = _start_arecord(alsa_device, rate, channels)
+    rec: Optional[subprocess.Popen[bytes]] = None
+    next_audio_retry_ts = 0.0
     gate = Gate()
     last_log_ts = 0.0
     silence = b"\x00" * bytes_per_frame
@@ -508,12 +532,41 @@ def main() -> int:
     try:
         with fifo_path.open("wb", buffering=0) as fifo:
             while running:
-                if rec.stdout is None:
-                    raise RuntimeError("arecord stdout missing")
-                frame = rec.stdout.read(bytes_per_frame)
-                if len(frame) != bytes_per_frame:
-                    err = rec.stderr.read().decode("utf-8", errors="replace") if rec.stderr else ""
-                    raise RuntimeError(f"arecord ended unexpectedly: {err}".strip())
+                now = time.time()
+                if rec is None and now >= next_audio_retry_ts:
+                    try:
+                        rec = _start_arecord(
+                            alsa_device,
+                            rate,
+                            channels,
+                            period_size=period_size,
+                            buffer_size=buffer_size,
+                        )
+                        state.update_status(audio_capture_active=True, audio_error=None)
+                    except Exception as exc:
+                        state.update_status(audio_capture_active=False, audio_error=str(exc))
+                        next_audio_retry_ts = now + audio_retry_seconds
+
+                frame = silence
+                if rec is not None:
+                    try:
+                        if rec.stdout is None:
+                            raise RuntimeError("arecord stdout missing")
+                        captured = rec.stdout.read(bytes_per_frame)
+                        if len(captured) != bytes_per_frame:
+                            err = rec.stderr.read().decode("utf-8", errors="replace") if rec.stderr else ""
+                            raise RuntimeError(f"arecord ended unexpectedly: {err}".strip())
+                        frame = captured
+                        state.update_status(audio_capture_active=True, audio_error=None)
+                    except Exception as exc:
+                        state.update_status(audio_capture_active=False, audio_error=str(exc))
+                        rec.terminate()
+                        try:
+                            rec.wait(timeout=1)
+                        except subprocess.TimeoutExpired:
+                            rec.kill()
+                        rec = None
+                        next_audio_retry_ts = now + audio_retry_seconds
 
                 telemetry = poller.snapshot()
                 front_center_deg = float(state.get_setting("FRONT_CENTER_DEG"))
@@ -559,6 +612,8 @@ def main() -> int:
                                 "is_voice": telemetry.is_voice,
                                 "in_front": in_front,
                                 "telemetry_error": telemetry.last_error or None,
+                                "audio_error": state.snapshot()["status"].get("audio_error"),
+                                "audio_capture_active": state.snapshot()["status"].get("audio_capture_active"),
                                 "open_counter_ms": gate.open_counter_ms,
                                 "close_counter_ms": gate.close_counter_ms,
                             }
@@ -569,11 +624,12 @@ def main() -> int:
         state.update_status(gateway_started=False)
         ui_server.shutdown()
         poller.stop()
-        rec.terminate()
-        try:
-            rec.wait(timeout=2)
-        except subprocess.TimeoutExpired:
-            rec.kill()
+        if rec is not None:
+            rec.terminate()
+            try:
+                rec.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                rec.kill()
 
     print(json.dumps({"event": "gateway_stopped"}), flush=True)
     return 0

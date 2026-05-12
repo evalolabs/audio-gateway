@@ -76,6 +76,7 @@ The UI shows:
 - current ReSpeaker `direction`
 - current `is_voice`
 - whether the direction is inside the configured front window
+- audio capture status and `arecord` errors
 - live diagnostics
 - editable calibration values
 
@@ -89,6 +90,8 @@ Most calibration changes apply immediately:
 Audio plumbing fields require a service restart after saving:
 
 - `ALSA_DEVICE`
+- `ARECORD_PERIOD_SIZE`
+- `ARECORD_BUFFER_SIZE`
 - `RATE`
 - `CHANNELS`
 - `FRAME_MS`
@@ -282,6 +285,33 @@ journalctl --user -u kiosk-audio-gateway.service -f
 If `direction` is `null` or `telemetry_error` is set, the ReSpeaker control path is broken.
 
 If `direction` is valid but outside the front window, recalibrate `FRONT_CENTER_DEG`.
+
+### UI is reachable but audio capture fails
+
+The service keeps running and retries capture automatically. Open:
+
+```text
+http://localhost:8765
+```
+
+Check `audio_error` in Diagnostics. For ReSpeaker UAC1 on Ubuntu 24.04, the default values are:
+
+```text
+ARECORD_PERIOD_SIZE=320
+ARECORD_BUFFER_SIZE=1280
+```
+
+If the device card changed, update `ALSA_DEVICE` in the UI or in:
+
+```bash
+nano ~/.config/kiosk-audio-gateway/config.env
+```
+
+Then restart:
+
+```bash
+systemctl --user restart kiosk-audio-gateway.service
+```
 
 ### Browser still uses wrong mic
 
