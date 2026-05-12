@@ -63,8 +63,8 @@ CONFIG_FIELDS: dict[str, dict[str, Any]] = {
     "RATE": {"type": "int", "default": 16000, "restart": True},
     "CHANNELS": {"type": "int", "default": 1, "restart": True},
     "FRAME_MS": {"type": "int", "default": 20, "restart": True},
-    "ARECORD_PERIOD_SIZE": {"type": "int", "default": 320, "restart": True},
-    "ARECORD_BUFFER_SIZE": {"type": "int", "default": 1280, "restart": True},
+    "ARECORD_PERIOD_SIZE": {"type": "int", "default": 0, "restart": True},
+    "ARECORD_BUFFER_SIZE": {"type": "int", "default": 0, "restart": True},
     "AUDIO_RETRY_SECONDS": {"type": "float", "default": 2.0, "restart": False},
     "FIFO_PATH": {"type": "str", "default": f"/run/user/{os.getuid()}/kiosk_customer_mic.fifo", "restart": True},
     "RESPEAKER_REPO": {"type": "str", "default": "~/Downloads/usb_4_mic_array", "restart": True},
@@ -429,15 +429,15 @@ def _start_arecord(
         str(rate),
         "-c",
         str(channels),
-        "--period-size",
-        str(period_size),
-        "--buffer-size",
-        str(buffer_size),
         "-t",
         "raw",
         "-q",
         "-",
     ]
+    if period_size > 0:
+        cmd.extend(["--period-size", str(period_size)])
+    if buffer_size > 0:
+        cmd.extend(["--buffer-size", str(buffer_size)])
     return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
 
 

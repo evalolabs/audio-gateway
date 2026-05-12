@@ -294,11 +294,11 @@ The service keeps running and retries capture automatically. Open:
 http://localhost:8765
 ```
 
-Check `audio_error` in Diagnostics. For ReSpeaker UAC1 on Ubuntu 24.04, the default values are:
+Check `audio_error` in Diagnostics. For ReSpeaker UAC1 on Ubuntu 24.04, keep explicit buffering disabled unless field tests prove it is needed:
 
 ```text
-ARECORD_PERIOD_SIZE=320
-ARECORD_BUFFER_SIZE=1280
+ARECORD_PERIOD_SIZE=0
+ARECORD_BUFFER_SIZE=0
 ```
 
 If the device card changed, update `ALSA_DEVICE` in the UI or in:
