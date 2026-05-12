@@ -460,7 +460,33 @@ def _start_arecord(
         cmd.extend(["--period-size", str(period_size)])
     if buffer_size > 0:
         cmd.extend(["--buffer-size", str(buffer_size)])
-    return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, bufsize=0)
+    if proc.stdout is not None:
+        os.set_blocking(proc.stdout.fileno(), False)
+    if proc.stderr is not None:
+        os.set_blocking(proc.stderr.fileno(), False)
+    return proc
+
+
+def _read_nonblocking(fd: int, max_bytes: int) -> bytes:
+    chunks: list[bytes] = []
+    remaining = max_bytes
+    while remaining > 0:
+        try:
+            chunk = os.read(fd, remaining)
+        except BlockingIOError:
+            break
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _read_arecord_stderr(rec: subprocess.Popen[bytes]) -> str:
+    if rec.stderr is None:
+        return ""
+    return _read_nonblocking(rec.stderr.fileno(), 64 * 1024).decode("utf-8", errors="replace")
 
 
 def _update_gate(
@@ -535,6 +561,7 @@ def main() -> int:
     gate = Gate()
     last_log_ts = 0.0
     silence = b"\x00" * bytes_per_frame
+    capture_buffer = bytearray()
 
     print(
         json.dumps(
@@ -566,6 +593,7 @@ def main() -> int:
                         period_size=period_size,
                         buffer_size=buffer_size,
                     )
+                    capture_buffer.clear()
                     state.update_status(audio_capture_active=True, audio_error=None)
                 except Exception as exc:
                     state.update_status(audio_capture_active=False, audio_error=str(exc))
@@ -576,11 +604,17 @@ def main() -> int:
                 try:
                     if rec.stdout is None:
                         raise RuntimeError("arecord stdout missing")
-                    captured = rec.stdout.read(bytes_per_frame)
-                    if len(captured) != bytes_per_frame:
-                        err = rec.stderr.read().decode("utf-8", errors="replace") if rec.stderr else ""
-                        raise RuntimeError(f"arecord ended unexpectedly: {err}".strip())
-                    frame = captured
+
+                    exit_code = rec.poll()
+                    if exit_code is not None:
+                        err = _read_arecord_stderr(rec)
+                        detail = f"arecord exited with status {exit_code}: {err}".strip()
+                        raise RuntimeError(detail)
+
+                    capture_buffer.extend(_read_nonblocking(rec.stdout.fileno(), bytes_per_frame * 8))
+                    if len(capture_buffer) >= bytes_per_frame:
+                        frame = bytes(capture_buffer[:bytes_per_frame])
+                        del capture_buffer[:bytes_per_frame]
                     state.update_status(audio_capture_active=True, audio_error=None)
                 except Exception as exc:
                     state.update_status(audio_capture_active=False, audio_error=str(exc))
@@ -590,6 +624,7 @@ def main() -> int:
                     except subprocess.TimeoutExpired:
                         rec.kill()
                     rec = None
+                    capture_buffer.clear()
                     next_audio_retry_ts = now + audio_retry_seconds
 
             telemetry = poller.snapshot()
@@ -647,6 +682,7 @@ def main() -> int:
                     ),
                     flush=True,
                 )
+            time.sleep(frame_ms / 1000.0)
     finally:
         state.update_status(gateway_started=False)
         ui_server.shutdown()
