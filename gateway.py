@@ -115,6 +115,7 @@ class GatewayState:
             "telemetry_error": None,
             "audio_error": None,
             "audio_capture_active": False,
+            "fifo_error": None,
             "open_counter_ms": 0,
             "close_counter_ms": 0,
             "alsa_device": settings.get("ALSA_DEVICE"),
@@ -411,6 +412,27 @@ def _ensure_fifo(path: Path) -> None:
     os.mkfifo(path)
 
 
+def _open_fifo_nonblocking(path: Path) -> int:
+    # O_RDWR prevents open() from blocking when PipeWire has not started reading
+    # yet. O_NONBLOCK prevents service stop/restart from hanging on fifo writes.
+    return os.open(path, os.O_RDWR | os.O_NONBLOCK)
+
+
+def _write_fifo_frame(fd: int, frame: bytes) -> Optional[str]:
+    try:
+        total = 0
+        while total < len(frame):
+            written = os.write(fd, frame[total:])
+            if written <= 0:
+                return "fifo write returned 0 bytes"
+            total += written
+        return None
+    except BlockingIOError:
+        return "fifo buffer full; waiting for virtual mic reader"
+    except OSError as exc:
+        return str(exc)
+
+
 def _start_arecord(
     device: str,
     rate: int,
@@ -529,101 +551,108 @@ def main() -> int:
     )
     state.update_status(gateway_started=True, alsa_device=alsa_device, fifo_path=str(fifo_path))
 
+    fifo_fd: Optional[int] = None
     try:
-        with fifo_path.open("wb", buffering=0) as fifo:
-            while running:
-                now = time.time()
-                if rec is None and now >= next_audio_retry_ts:
-                    try:
-                        rec = _start_arecord(
-                            alsa_device,
-                            rate,
-                            channels,
-                            period_size=period_size,
-                            buffer_size=buffer_size,
-                        )
-                        state.update_status(audio_capture_active=True, audio_error=None)
-                    except Exception as exc:
-                        state.update_status(audio_capture_active=False, audio_error=str(exc))
-                        next_audio_retry_ts = now + audio_retry_seconds
-
-                frame = silence
-                if rec is not None:
-                    try:
-                        if rec.stdout is None:
-                            raise RuntimeError("arecord stdout missing")
-                        captured = rec.stdout.read(bytes_per_frame)
-                        if len(captured) != bytes_per_frame:
-                            err = rec.stderr.read().decode("utf-8", errors="replace") if rec.stderr else ""
-                            raise RuntimeError(f"arecord ended unexpectedly: {err}".strip())
-                        frame = captured
-                        state.update_status(audio_capture_active=True, audio_error=None)
-                    except Exception as exc:
-                        state.update_status(audio_capture_active=False, audio_error=str(exc))
-                        rec.terminate()
-                        try:
-                            rec.wait(timeout=1)
-                        except subprocess.TimeoutExpired:
-                            rec.kill()
-                        rec = None
-                        next_audio_retry_ts = now + audio_retry_seconds
-
-                telemetry = poller.snapshot()
-                front_center_deg = float(state.get_setting("FRONT_CENTER_DEG"))
-                front_half_window_deg = float(state.get_setting("FRONT_HALF_WINDOW_DEG"))
-                open_stable_ms = int(state.get_setting("OPEN_STABLE_MS"))
-                close_stable_ms = int(state.get_setting("CLOSE_STABLE_MS"))
-                is_open = _update_gate(
-                    gate,
-                    telemetry,
-                    frame_ms=frame_ms,
-                    front_center_deg=front_center_deg,
-                    front_half_window_deg=front_half_window_deg,
-                    open_stable_ms=open_stable_ms,
-                    close_stable_ms=close_stable_ms,
-                )
-                fifo.write(frame if is_open else silence)
-                angular_error = (
-                    _angular_error_deg(telemetry.direction, front_center_deg)
-                    if telemetry.direction is not None
-                    else None
-                )
-                in_front = angular_error is not None and angular_error <= front_half_window_deg
-                state.update_status(
-                    gate_open=is_open,
-                    direction=telemetry.direction,
-                    is_voice=telemetry.is_voice,
-                    in_front=in_front,
-                    angular_error_deg=angular_error,
-                    telemetry_error=telemetry.last_error or None,
-                    open_counter_ms=gate.open_counter_ms,
-                    close_counter_ms=gate.close_counter_ms,
-                )
-
-                now = time.time()
-                if now - last_log_ts >= 1.0:
-                    last_log_ts = now
-                    print(
-                        json.dumps(
-                            {
-                                "event": "gate_status",
-                                "gate_open": is_open,
-                                "direction": telemetry.direction,
-                                "is_voice": telemetry.is_voice,
-                                "in_front": in_front,
-                                "telemetry_error": telemetry.last_error or None,
-                                "audio_error": state.snapshot()["status"].get("audio_error"),
-                                "audio_capture_active": state.snapshot()["status"].get("audio_capture_active"),
-                                "open_counter_ms": gate.open_counter_ms,
-                                "close_counter_ms": gate.close_counter_ms,
-                            }
-                        ),
-                        flush=True,
+        fifo_fd = _open_fifo_nonblocking(fifo_path)
+        state.update_status(fifo_error=None)
+        while running:
+            now = time.time()
+            if rec is None and now >= next_audio_retry_ts:
+                try:
+                    rec = _start_arecord(
+                        alsa_device,
+                        rate,
+                        channels,
+                        period_size=period_size,
+                        buffer_size=buffer_size,
                     )
+                    state.update_status(audio_capture_active=True, audio_error=None)
+                except Exception as exc:
+                    state.update_status(audio_capture_active=False, audio_error=str(exc))
+                    next_audio_retry_ts = now + audio_retry_seconds
+
+            frame = silence
+            if rec is not None:
+                try:
+                    if rec.stdout is None:
+                        raise RuntimeError("arecord stdout missing")
+                    captured = rec.stdout.read(bytes_per_frame)
+                    if len(captured) != bytes_per_frame:
+                        err = rec.stderr.read().decode("utf-8", errors="replace") if rec.stderr else ""
+                        raise RuntimeError(f"arecord ended unexpectedly: {err}".strip())
+                    frame = captured
+                    state.update_status(audio_capture_active=True, audio_error=None)
+                except Exception as exc:
+                    state.update_status(audio_capture_active=False, audio_error=str(exc))
+                    rec.terminate()
+                    try:
+                        rec.wait(timeout=1)
+                    except subprocess.TimeoutExpired:
+                        rec.kill()
+                    rec = None
+                    next_audio_retry_ts = now + audio_retry_seconds
+
+            telemetry = poller.snapshot()
+            front_center_deg = float(state.get_setting("FRONT_CENTER_DEG"))
+            front_half_window_deg = float(state.get_setting("FRONT_HALF_WINDOW_DEG"))
+            open_stable_ms = int(state.get_setting("OPEN_STABLE_MS"))
+            close_stable_ms = int(state.get_setting("CLOSE_STABLE_MS"))
+            is_open = _update_gate(
+                gate,
+                telemetry,
+                frame_ms=frame_ms,
+                front_center_deg=front_center_deg,
+                front_half_window_deg=front_half_window_deg,
+                open_stable_ms=open_stable_ms,
+                close_stable_ms=close_stable_ms,
+            )
+            fifo_error = _write_fifo_frame(fifo_fd, frame if is_open else silence)
+            state.update_status(fifo_error=fifo_error)
+            angular_error = (
+                _angular_error_deg(telemetry.direction, front_center_deg)
+                if telemetry.direction is not None
+                else None
+            )
+            in_front = angular_error is not None and angular_error <= front_half_window_deg
+            state.update_status(
+                gate_open=is_open,
+                direction=telemetry.direction,
+                is_voice=telemetry.is_voice,
+                in_front=in_front,
+                angular_error_deg=angular_error,
+                telemetry_error=telemetry.last_error or None,
+                open_counter_ms=gate.open_counter_ms,
+                close_counter_ms=gate.close_counter_ms,
+            )
+
+            now = time.time()
+            if now - last_log_ts >= 1.0:
+                last_log_ts = now
+                current_status = state.snapshot()["status"]
+                print(
+                    json.dumps(
+                        {
+                            "event": "gate_status",
+                            "gate_open": is_open,
+                            "direction": telemetry.direction,
+                            "is_voice": telemetry.is_voice,
+                            "in_front": in_front,
+                            "telemetry_error": telemetry.last_error or None,
+                            "audio_error": current_status.get("audio_error"),
+                            "audio_capture_active": current_status.get("audio_capture_active"),
+                            "fifo_error": current_status.get("fifo_error"),
+                            "open_counter_ms": gate.open_counter_ms,
+                            "close_counter_ms": gate.close_counter_ms,
+                        }
+                    ),
+                    flush=True,
+                )
     finally:
         state.update_status(gateway_started=False)
         ui_server.shutdown()
         poller.stop()
+        if fifo_fd is not None:
+            os.close(fifo_fd)
         if rec is not None:
             rec.terminate()
             try:
