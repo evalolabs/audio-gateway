@@ -1,0 +1,21 @@
+[Unit]
+Description=Kiosk directional ReSpeaker audio gateway
+After=pipewire.service pipewire-pulse.service wireplumber.service
+Wants=pipewire.service pipewire-pulse.service wireplumber.service
+
+[Service]
+Type=simple
+Environment=RATE=16000
+Environment=FIFO_PATH=%t/kiosk_customer_mic.fifo
+EnvironmentFile=-%h/.config/kiosk-audio-gateway/config.env
+ExecStartPre=/usr/bin/bash -lc 'test -p "$FIFO_PATH" || mkfifo "$FIFO_PATH"'
+ExecStartPre=/usr/bin/bash -lc 'pactl list sources short | grep -q kiosk_customer_mic || pactl load-module module-pipe-source file="$FIFO_PATH" source_name=kiosk_customer_mic source_properties=device.description="Kiosk Customer Mic" format=s16le rate="$RATE" channels=1 channel_map=mono'
+ExecStart=__INSTALL_DIR__/gateway.py --config %h/.config/kiosk-audio-gateway/config.env
+Restart=always
+RestartSec=2
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
