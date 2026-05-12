@@ -385,22 +385,32 @@ class ReSpeakerTelemetryPoller:
             sys.path.insert(0, str(self.repo))
             import usb.core  # type: ignore
             from tuning import Tuning  # type: ignore
-
-            dev = usb.core.find(idVendor=0x2886, idProduct=0x0018)
-            if dev is None:
-                raise RuntimeError("ReSpeaker 2886:0018 not found")
-            mic = Tuning(dev)
         except Exception as exc:
             self._set(direction=None, is_voice=False, last_error=str(exc))
             return
 
+        mic: Optional[Any] = None
         while not self._stop.is_set():
+            if mic is None:
+                try:
+                    dev = usb.core.find(idVendor=0x2886, idProduct=0x0018)
+                    if dev is None:
+                        raise RuntimeError("ReSpeaker 2886:0018 not found")
+                    mic = Tuning(dev)
+                except Exception as exc:
+                    self._set(direction=None, is_voice=False, last_error=str(exc))
+                    self._stop.wait(max(1.0, self.poll_ms / 1000.0))
+                    continue
+
             try:
                 direction = float(mic.direction)
                 is_voice = bool(mic.is_voice())
                 self._set(direction=direction, is_voice=is_voice)
             except Exception as exc:
                 self._set(direction=None, is_voice=False, last_error=str(exc))
+                mic = None
+                self._stop.wait(max(0.5, self.poll_ms / 1000.0))
+                continue
             self._stop.wait(self.poll_ms / 1000.0)
 
 
