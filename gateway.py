@@ -72,6 +72,9 @@ CONFIG_FIELDS: dict[str, dict[str, Any]] = {
     "FRONT_HALF_WINDOW_DEG": {"type": "float", "default": 35.0, "restart": False},
     "OPEN_STABLE_MS": {"type": "int", "default": 400, "restart": False},
     "CLOSE_STABLE_MS": {"type": "int", "default": 250, "restart": False},
+    # When gate is open and direction stays in the front window but ReSpeaker is_voice
+    # blinks false briefly, wait this long before closing (reduces choppy mic).
+    "IN_FRONT_VOICE_DROP_MS": {"type": "int", "default": 800, "restart": False},
     "POLL_MS": {"type": "int", "default": 50, "restart": True},
     "UI_HOST": {"type": "str", "default": "127.0.0.1", "restart": True},
     "UI_PORT": {"type": "int", "default": 8765, "restart": True},
@@ -230,6 +233,8 @@ def _ui_html() -> bytes:
       <input name="OPEN_STABLE_MS" type="number" step="10">
       <label>Close stable ms</label>
       <input name="CLOSE_STABLE_MS" type="number" step="10">
+      <label>In-front voice drop hold ms (longer close delay while still in beam)</label>
+      <input name="IN_FRONT_VOICE_DROP_MS" type="number" step="50">
       <label>ALSA device (restart required)</label>
       <input name="ALSA_DEVICE" type="text">
       <label>arecord period size (restart required)</label>
@@ -553,6 +558,7 @@ def _update_gate(
     front_half_window_deg: float,
     open_stable_ms: int,
     close_stable_ms: int,
+    in_front_voice_drop_ms: int,
 ) -> bool:
     in_front = (
         telemetry.direction is not None
@@ -565,9 +571,12 @@ def _update_gate(
         if gate.open_counter_ms >= open_stable_ms:
             gate.is_open = True
     else:
+        close_need_ms = close_stable_ms
+        if gate.is_open and in_front and not telemetry.is_voice:
+            close_need_ms = max(close_stable_ms, in_front_voice_drop_ms)
         gate.close_counter_ms += frame_ms
         gate.open_counter_ms = 0
-        if gate.close_counter_ms >= close_stable_ms:
+        if gate.close_counter_ms >= close_need_ms:
             gate.is_open = False
     return gate.is_open
 
@@ -697,6 +706,7 @@ def main() -> int:
             front_half_window_deg = float(state.get_setting("FRONT_HALF_WINDOW_DEG"))
             open_stable_ms = int(state.get_setting("OPEN_STABLE_MS"))
             close_stable_ms = int(state.get_setting("CLOSE_STABLE_MS"))
+            in_front_voice_drop_ms = int(state.get_setting("IN_FRONT_VOICE_DROP_MS"))
             is_open = _update_gate(
                 gate,
                 telemetry,
@@ -705,6 +715,7 @@ def main() -> int:
                 front_half_window_deg=front_half_window_deg,
                 open_stable_ms=open_stable_ms,
                 close_stable_ms=close_stable_ms,
+                in_front_voice_drop_ms=in_front_voice_drop_ms,
             )
             fifo_error = _write_fifo_frame(
                 fifo_fd,

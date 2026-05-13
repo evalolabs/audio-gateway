@@ -28,6 +28,7 @@ FRONT_CENTER_DEG=180
 FRONT_HALF_WINDOW_DEG=35
 OPEN_STABLE_MS=400
 CLOSE_STABLE_MS=250
+IN_FRONT_VOICE_DROP_MS=800
 ```
 
 That means audio opens only when voice is detected in roughly `145-215` degrees for about `400 ms`.
@@ -86,6 +87,7 @@ Most calibration changes apply immediately:
 - `FRONT_HALF_WINDOW_DEG`
 - `OPEN_STABLE_MS`
 - `CLOSE_STABLE_MS`
+- `IN_FRONT_VOICE_DROP_MS`
 
 Audio plumbing fields require a service restart after saving:
 
@@ -371,3 +373,5 @@ Mitigations:
 ### Gate opens/closes while you stand in front
 
 If `gate_transition` flips to `gate_open: false` while `in_front` stays true, ReSpeaker **`is_voice`** dropped briefly. Try slightly higher **`OPEN_STABLE_MS`**, lower **`CLOSE_STABLE_MS`**, or a wider **`FRONT_HALF_WINDOW_DEG`** only after you confirmed direction is stable in the UI.
+
+**Prefer:** raise **`IN_FRONT_VOICE_DROP_MS`** (default **800** after gateway update). While the gate is **open** and direction stays **in the front window**, a short `is_voice: false` blink must last this long before the gate closes. Leaving the beam still uses **`CLOSE_STABLE_MS`** for a fast mute.
