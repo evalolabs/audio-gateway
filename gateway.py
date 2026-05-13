@@ -428,7 +428,27 @@ def _open_fifo_nonblocking(path: Path) -> int:
     return os.open(path, os.O_RDWR | os.O_NONBLOCK)
 
 
-def _write_fifo_frame(fd: int, frame: bytes, *, write_timeout_s: float = 0.25) -> Optional[str]:
+def _try_enlarge_pipe(fd: int, target_bytes: int) -> Optional[int]:
+    """Linux only: grow the pipe buffer so PipeWire/WebRTC bursts stall less often."""
+    if target_bytes <= 0:
+        return None
+    try:
+        import fcntl
+
+        if not hasattr(fcntl, "F_SETPIPE_SZ"):
+            return None
+        return int(fcntl.fcntl(fd, fcntl.F_SETPIPE_SZ, target_bytes))
+    except OSError:
+        return None
+
+
+def _write_fifo_frame(
+    fd: int,
+    frame: bytes,
+    *,
+    write_timeout_s: float = 0.25,
+    pad_timeout_s: float = 0.12,
+) -> Optional[str]:
     """Write one full PCM frame. Retries on EAGAIN so we rarely drop audio.
 
     A non-blocking FIFO can return BlockingIOError when PipeWire is briefly behind.
@@ -451,7 +471,7 @@ def _write_fifo_frame(fd: int, frame: bytes, *, write_timeout_s: float = 0.25) -
     if total >= len(frame):
         return None
     pad = b"\x00" * (len(frame) - total)
-    pad_deadline = time.monotonic() + 0.05
+    pad_deadline = time.monotonic() + max(0.05, pad_timeout_s)
     pt = 0
     while pt < len(pad):
         try:
@@ -576,6 +596,9 @@ def main() -> int:
     audio_retry_seconds = float(settings["AUDIO_RETRY_SECONDS"])
     ui_host = str(settings["UI_HOST"])
     ui_port = int(settings["UI_PORT"])
+    fifo_write_timeout_s = _env_float("FIFO_WRITE_TIMEOUT_S", 0.6)
+    fifo_pad_timeout_s = _env_float("FIFO_PAD_TIMEOUT_S", 0.15)
+    fifo_pipe_size_bytes = _env_int("FIFO_PIPE_SIZE_BYTES", 1048576)
 
     running = True
 
@@ -601,24 +624,28 @@ def main() -> int:
     capture_buffer = bytearray()
     debug_extra = os.environ.get("KIOSK_GATEWAY_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
-    print(
-        json.dumps(
-            {
-                "event": "gateway_started",
-                "alsa_device": alsa_device,
-                "fifo_path": str(fifo_path),
-                "rate": rate,
-                "frame_ms": frame_ms,
-                "ui_url": f"http://{ui_host}:{ui_port}",
-            }
-        ),
-        flush=True,
-    )
-    state.update_status(gateway_started=True, alsa_device=alsa_device, fifo_path=str(fifo_path))
-
     fifo_fd: Optional[int] = None
     try:
         fifo_fd = _open_fifo_nonblocking(fifo_path)
+        fifo_pipe_applied = _try_enlarge_pipe(fifo_fd, fifo_pipe_size_bytes)
+        print(
+            json.dumps(
+                {
+                    "event": "gateway_started",
+                    "alsa_device": alsa_device,
+                    "fifo_path": str(fifo_path),
+                    "rate": rate,
+                    "frame_ms": frame_ms,
+                    "ui_url": f"http://{ui_host}:{ui_port}",
+                    "fifo_pipe_size_requested": fifo_pipe_size_bytes,
+                    "fifo_pipe_size_applied": fifo_pipe_applied,
+                    "fifo_write_timeout_s": fifo_write_timeout_s,
+                    "fifo_pad_timeout_s": fifo_pad_timeout_s,
+                }
+            ),
+            flush=True,
+        )
+        state.update_status(gateway_started=True, alsa_device=alsa_device, fifo_path=str(fifo_path))
         state.update_status(fifo_error=None)
         while running:
             now = time.time()
@@ -679,7 +706,12 @@ def main() -> int:
                 open_stable_ms=open_stable_ms,
                 close_stable_ms=close_stable_ms,
             )
-            fifo_error = _write_fifo_frame(fifo_fd, frame if is_open else silence)
+            fifo_error = _write_fifo_frame(
+                fifo_fd,
+                frame if is_open else silence,
+                write_timeout_s=fifo_write_timeout_s,
+                pad_timeout_s=fifo_pad_timeout_s,
+            )
             state.update_status(fifo_error=fifo_error)
             if fifo_error != prev_fifo_error:
                 print(

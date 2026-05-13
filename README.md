@@ -356,3 +356,18 @@ Kiosk Customer Mic
 ```
 
 If labels are hidden, grant microphone permission once and reload the display page.
+
+### `fifo_error`: `fifo buffer full; incomplete frame`
+
+The gateway always pushes PCM at `FRAME_MS` into the FIFO. **PipeWire** (virtual source) must read at roughly the same rate. If **no app** is capturing `kiosk_customer_mic`, or WebRTC is **bursty**, the pipe fills and you see this error (often **before** a call starts, or briefly during load).
+
+Mitigations:
+
+1. Start the Display **voice call** so Firefox actually pulls from the mic (then errors often disappear, as in your log at `12:28:28`).
+2. After `git pull`, the gateway requests a **larger Linux pipe buffer** (`F_SETPIPE_SZ`, default **1 MiB** via `FIFO_PIPE_SIZE_BYTES`). Check `gateway_started` in the journal for `fifo_pipe_size_applied` (non-null = success).
+3. Tune **`FIFO_WRITE_TIMEOUT_S`** (default `0.6`) and **`FIFO_PAD_TIMEOUT_S`** (default `0.15`) in `~/.config/kiosk-audio-gateway/config.env` if the reader is consistently slow.
+4. Ensure **only one** heavy consumer on that source if possible.
+
+### Gate opens/closes while you stand in front
+
+If `gate_transition` flips to `gate_open: false` while `in_front` stays true, ReSpeaker **`is_voice`** dropped briefly. Try slightly higher **`OPEN_STABLE_MS`**, lower **`CLOSE_STABLE_MS`**, or a wider **`FRONT_HALF_WINDOW_DEG`** only after you confirmed direction is stable in the UI.
