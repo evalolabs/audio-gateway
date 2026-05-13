@@ -595,8 +595,11 @@ def main() -> int:
     next_audio_retry_ts = 0.0
     gate = Gate()
     last_log_ts = 0.0
+    prev_gate_open: Optional[bool] = None
+    prev_fifo_error: Optional[str] = None
     silence = b"\x00" * bytes_per_frame
     capture_buffer = bytearray()
+    debug_extra = os.environ.get("KIOSK_GATEWAY_DEBUG", "").strip().lower() in ("1", "true", "yes")
 
     print(
         json.dumps(
@@ -678,6 +681,18 @@ def main() -> int:
             )
             fifo_error = _write_fifo_frame(fifo_fd, frame if is_open else silence)
             state.update_status(fifo_error=fifo_error)
+            if fifo_error != prev_fifo_error:
+                print(
+                    json.dumps(
+                        {
+                            "event": "fifo_status",
+                            "fifo_error": fifo_error,
+                            "gate_open": is_open,
+                        }
+                    ),
+                    flush=True,
+                )
+                prev_fifo_error = fifo_error
             angular_error = (
                 _angular_error_deg(telemetry.direction, front_center_deg)
                 if telemetry.direction is not None
@@ -695,28 +710,44 @@ def main() -> int:
                 close_counter_ms=gate.close_counter_ms,
             )
 
-            now = time.time()
-            if now - last_log_ts >= 1.0:
-                last_log_ts = now
-                current_status = state.snapshot()["status"]
+            if prev_gate_open is not None and prev_gate_open != is_open:
                 print(
                     json.dumps(
                         {
-                            "event": "gate_status",
+                            "event": "gate_transition",
                             "gate_open": is_open,
                             "direction": telemetry.direction,
                             "is_voice": telemetry.is_voice,
                             "in_front": in_front,
-                            "telemetry_error": telemetry.last_error or None,
-                            "audio_error": current_status.get("audio_error"),
-                            "audio_capture_active": current_status.get("audio_capture_active"),
-                            "fifo_error": current_status.get("fifo_error"),
+                            "angular_error_deg": angular_error,
                             "open_counter_ms": gate.open_counter_ms,
                             "close_counter_ms": gate.close_counter_ms,
                         }
                     ),
                     flush=True,
                 )
+            prev_gate_open = is_open
+
+            now = time.time()
+            if now - last_log_ts >= 1.0:
+                last_log_ts = now
+                current_status = state.snapshot()["status"]
+                status_payload: dict[str, Any] = {
+                    "event": "gate_status",
+                    "gate_open": is_open,
+                    "direction": telemetry.direction,
+                    "is_voice": telemetry.is_voice,
+                    "in_front": in_front,
+                    "telemetry_error": telemetry.last_error or None,
+                    "audio_error": current_status.get("audio_error"),
+                    "audio_capture_active": current_status.get("audio_capture_active"),
+                    "fifo_error": current_status.get("fifo_error"),
+                    "open_counter_ms": gate.open_counter_ms,
+                    "close_counter_ms": gate.close_counter_ms,
+                }
+                if debug_extra:
+                    status_payload["capture_backlog_frames"] = len(capture_buffer) // max(1, bytes_per_frame)
+                print(json.dumps(status_payload), flush=True)
             time.sleep(frame_ms / 1000.0)
     finally:
         state.update_status(gateway_started=False)

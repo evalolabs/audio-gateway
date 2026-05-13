@@ -113,6 +113,40 @@ Logs are still available for deeper troubleshooting:
 journalctl --user -u kiosk-audio-gateway.service -f
 ```
 
+### Capture logs during a live voice call
+
+On the NUC, in **one** terminal, start a rolling capture (stop with `Ctrl+C` after the call):
+
+```bash
+journalctl --user -u kiosk-audio-gateway.service -f --no-hostname -o short-precise | tee ~/kiosk-gateway-$(date +%Y%m%d-%H%M%S).log
+```
+
+Then start the MonshyDisplay call and speak as you normally would. The file under `$HOME` is what you attach or grep later.
+
+Optional: extra backlog hint in each `gate_status` line (helps spot `arecord` underruns):
+
+```bash
+nano ~/.config/kiosk-audio-gateway/config.env
+```
+
+Add:
+
+```text
+KIOSK_GATEWAY_DEBUG=1
+```
+
+Then:
+
+```bash
+systemctl --user restart kiosk-audio-gateway.service
+```
+
+Useful JSON events in the journal:
+
+- `gate_transition` — gate opened or closed (direction / `is_voice` / `in_front` at that moment).
+- `fifo_status` — FIFO write errors appear or clear (PipeWire reader not keeping up, alignment issues).
+- `gate_status` — once per second heartbeat (same fields as the local UI).
+
 Expected log events:
 
 ```json
