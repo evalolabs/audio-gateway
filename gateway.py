@@ -428,19 +428,44 @@ def _open_fifo_nonblocking(path: Path) -> int:
     return os.open(path, os.O_RDWR | os.O_NONBLOCK)
 
 
-def _write_fifo_frame(fd: int, frame: bytes) -> Optional[str]:
-    try:
-        total = 0
-        while total < len(frame):
+def _write_fifo_frame(fd: int, frame: bytes, *, write_timeout_s: float = 0.25) -> Optional[str]:
+    """Write one full PCM frame. Retries on EAGAIN so we rarely drop audio.
+
+    A non-blocking FIFO can return BlockingIOError when PipeWire is briefly behind.
+    Abandoning a partial frame would shift byte alignment for the virtual mic reader.
+    """
+    deadline = time.monotonic() + max(0.05, write_timeout_s)
+    total = 0
+    while total < len(frame):
+        try:
             written = os.write(fd, frame[total:])
             if written <= 0:
                 return "fifo write returned 0 bytes"
             total += written
+        except BlockingIOError:
+            if time.monotonic() >= deadline:
+                break
+            time.sleep(0.001)
+        except OSError as exc:
+            return str(exc)
+    if total >= len(frame):
         return None
-    except BlockingIOError:
-        return "fifo buffer full; waiting for virtual mic reader"
-    except OSError as exc:
-        return str(exc)
+    pad = b"\x00" * (len(frame) - total)
+    pad_deadline = time.monotonic() + 0.05
+    pt = 0
+    while pt < len(pad):
+        try:
+            w = os.write(fd, pad[pt:])
+            if w <= 0:
+                return "fifo buffer full; incomplete frame"
+            pt += w
+        except BlockingIOError:
+            if time.monotonic() >= pad_deadline:
+                return "fifo buffer full; incomplete frame"
+            time.sleep(0.001)
+        except OSError as exc:
+            return str(exc)
+    return None
 
 
 def _start_arecord(
