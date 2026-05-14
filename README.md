@@ -90,6 +90,7 @@ Most calibration changes apply immediately:
 - `CLOSE_STABLE_MS`
 - `IN_FRONT_VOICE_DROP_MS`
 - `IN_FRONT_BEAM_DROP_MS`
+- `REQUIRE_IS_VOICE_FOR_GATE`
 
 Audio plumbing fields require a service restart after saving:
 
@@ -383,3 +384,5 @@ If `gate_transition` flips to `gate_open: false` while `in_front` stays true, Re
 **Prefer:** raise **`IN_FRONT_VOICE_DROP_MS`** (default **800** after gateway update). While the gate is **open** and direction stays **in the front window**, a short `is_voice: false` blink must last this long before the gate closes.
 
 If the bot **hears a few words then goes deaf** while you still speak, the DOA often **flickers out of the front window** for short moments while **`is_voice` stays true**. Raise **`IN_FRONT_BEAM_DROP_MS`** (default **700**): the gate stays open longer when voice is still detected but direction briefly left the beam. Leaving both (no voice and out of beam) still uses **`CLOSE_STABLE_MS`** for a relatively fast mute.
+
+If **`is_voice` is almost always false** in `gate_status` but **`in_front` is true** while someone speaks, ReSpeaker's internal VAD may not match your environment. Set **`REQUIRE_IS_VOICE_FOR_GATE=0`** (UI or `config.env`) to gate on **direction only** (gate still closes when DOA leaves the beam per **`IN_FRONT_BEAM_DROP_MS`**). **Trade-off:** noisier spaces may pass more background; keep **`FRONT_HALF_WINDOW_DEG`** tight and **`FRONT_CENTER_DEG`** accurate.
