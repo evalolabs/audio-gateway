@@ -86,6 +86,7 @@ Most calibration changes apply immediately:
 - `FRONT_CENTER_DEG`
 - `FRONT_HALF_WINDOW_DEG`
 - `OPEN_STABLE_MS`
+- `OPEN_ACCUMULATE_GRACE_MS`
 - `CLOSE_STABLE_MS`
 - `IN_FRONT_VOICE_DROP_MS`
 
@@ -321,6 +322,10 @@ journalctl --user -u kiosk-audio-gateway.service -f
 If `direction` is `null` or `telemetry_error` is set, the ReSpeaker control path is broken.
 
 If `direction` is valid but outside the front window, recalibrate `FRONT_CENTER_DEG`.
+
+### UI shows Voice YES and In front YES but gate stays CLOSED
+
+The web UI refreshes about every **500ms**. The gate loop runs every **`FRAME_MS`** (default **20ms**) and needs **`is_voice` and `in_front` true together** for **`OPEN_STABLE_MS`** in a row. Micro-blinks of `is_voice` used to reset that progress to zero every time. Use **`OPEN_ACCUMULATE_GRACE_MS`** (default **120ms**): short gaps while the gate is still closed do not wipe `open_counter_ms`. You can also lower **`OPEN_STABLE_MS`** slightly (for example **300**) if opening still feels slow.
 
 ### UI is reachable but audio capture fails
 

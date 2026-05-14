@@ -71,6 +71,9 @@ CONFIG_FIELDS: dict[str, dict[str, Any]] = {
     "FRONT_CENTER_DEG": {"type": "float", "default": 180.0, "restart": False},
     "FRONT_HALF_WINDOW_DEG": {"type": "float", "default": 35.0, "restart": False},
     "OPEN_STABLE_MS": {"type": "int", "default": 400, "restart": False},
+    # While gate is closed, brief gaps in (is_voice and in_front) do not reset open progress
+    # until this many ms of continuous "should not open" (UI polls slower than the gate loop).
+    "OPEN_ACCUMULATE_GRACE_MS": {"type": "int", "default": 120, "restart": False},
     "CLOSE_STABLE_MS": {"type": "int", "default": 250, "restart": False},
     # When gate is open and direction stays in the front window but ReSpeaker is_voice
     # blinks false briefly, wait this long before closing (reduces choppy mic).
@@ -231,6 +234,8 @@ def _ui_html() -> bytes:
       <input name="FRONT_HALF_WINDOW_DEG" type="number" step="1">
       <label>Open stable ms</label>
       <input name="OPEN_STABLE_MS" type="number" step="10">
+      <label>Open accumulate grace ms (ignore brief gaps while opening)</label>
+      <input name="OPEN_ACCUMULATE_GRACE_MS" type="number" step="10">
       <label>Close stable ms</label>
       <input name="CLOSE_STABLE_MS" type="number" step="10">
       <label>In-front voice drop hold ms (longer close delay while still in beam)</label>
@@ -352,6 +357,7 @@ class Gate:
     open_counter_ms: int = 0
     close_counter_ms: int = 0
     is_open: bool = False
+    open_false_streak_ms: int = 0
 
 
 class ReSpeakerTelemetryPoller:
@@ -559,6 +565,7 @@ def _update_gate(
     open_stable_ms: int,
     close_stable_ms: int,
     in_front_voice_drop_ms: int,
+    open_accumulate_grace_ms: int,
 ) -> bool:
     in_front = (
         telemetry.direction is not None
@@ -566,6 +573,7 @@ def _update_gate(
     )
     should_open = bool(telemetry.is_voice and in_front)
     if should_open:
+        gate.open_false_streak_ms = 0
         gate.open_counter_ms += frame_ms
         gate.close_counter_ms = 0
         if gate.open_counter_ms >= open_stable_ms:
@@ -575,7 +583,13 @@ def _update_gate(
         if gate.is_open and in_front and not telemetry.is_voice:
             close_need_ms = max(close_stable_ms, in_front_voice_drop_ms)
         gate.close_counter_ms += frame_ms
-        gate.open_counter_ms = 0
+        if gate.is_open:
+            gate.open_counter_ms = 0
+        else:
+            gate.open_false_streak_ms += frame_ms
+            if gate.open_false_streak_ms > open_accumulate_grace_ms:
+                gate.open_counter_ms = 0
+                gate.open_false_streak_ms = 0
         if gate.close_counter_ms >= close_need_ms:
             gate.is_open = False
     return gate.is_open
@@ -705,6 +719,7 @@ def main() -> int:
             front_center_deg = float(state.get_setting("FRONT_CENTER_DEG"))
             front_half_window_deg = float(state.get_setting("FRONT_HALF_WINDOW_DEG"))
             open_stable_ms = int(state.get_setting("OPEN_STABLE_MS"))
+            open_accumulate_grace_ms = int(state.get_setting("OPEN_ACCUMULATE_GRACE_MS"))
             close_stable_ms = int(state.get_setting("CLOSE_STABLE_MS"))
             in_front_voice_drop_ms = int(state.get_setting("IN_FRONT_VOICE_DROP_MS"))
             is_open = _update_gate(
@@ -716,6 +731,7 @@ def main() -> int:
                 open_stable_ms=open_stable_ms,
                 close_stable_ms=close_stable_ms,
                 in_front_voice_drop_ms=in_front_voice_drop_ms,
+                open_accumulate_grace_ms=open_accumulate_grace_ms,
             )
             fifo_error = _write_fifo_frame(
                 fifo_fd,
