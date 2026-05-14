@@ -89,6 +89,7 @@ Most calibration changes apply immediately:
 - `OPEN_ACCUMULATE_GRACE_MS`
 - `CLOSE_STABLE_MS`
 - `IN_FRONT_VOICE_DROP_MS`
+- `IN_FRONT_BEAM_DROP_MS`
 
 Audio plumbing fields require a service restart after saving:
 
@@ -379,4 +380,6 @@ Mitigations:
 
 If `gate_transition` flips to `gate_open: false` while `in_front` stays true, ReSpeaker **`is_voice`** dropped briefly. Try slightly higher **`OPEN_STABLE_MS`**, lower **`CLOSE_STABLE_MS`**, or a wider **`FRONT_HALF_WINDOW_DEG`** only after you confirmed direction is stable in the UI.
 
-**Prefer:** raise **`IN_FRONT_VOICE_DROP_MS`** (default **800** after gateway update). While the gate is **open** and direction stays **in the front window**, a short `is_voice: false` blink must last this long before the gate closes. Leaving the beam still uses **`CLOSE_STABLE_MS`** for a fast mute.
+**Prefer:** raise **`IN_FRONT_VOICE_DROP_MS`** (default **800** after gateway update). While the gate is **open** and direction stays **in the front window**, a short `is_voice: false` blink must last this long before the gate closes.
+
+If the bot **hears a few words then goes deaf** while you still speak, the DOA often **flickers out of the front window** for short moments while **`is_voice` stays true**. Raise **`IN_FRONT_BEAM_DROP_MS`** (default **700**): the gate stays open longer when voice is still detected but direction briefly left the beam. Leaving both (no voice and out of beam) still uses **`CLOSE_STABLE_MS`** for a relatively fast mute.
